@@ -30,13 +30,19 @@ def preview(value: Any, limit: int = 500) -> str:
 @tool
 def check_weather(location: str) -> str:
     """Return the mock weather forecast for a location."""
-    return f"It's always sunny in {location}."
+    logger.info("TOOL check_weather START location=%s", location)
+    result = f"It's always sunny in {location}."
+    logger.info("TOOL check_weather END result=%s", result)
+    return result
 
 
 @tool
 def get_location() -> str:
     """Return the user's mock current location."""
-    return "Yosemite National Park, California"
+    logger.info("TOOL get_location START")
+    result = "Yosemite National Park, California"
+    logger.info("TOOL get_location END result=%s", result)
+    return result
 
 
 # Build the model from environment variables so the provider can be changed
