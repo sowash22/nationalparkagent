@@ -1,0 +1,22 @@
+[project]
+name = "nationalparkagent"
+version = "0.1.0"
+description = "A national park agent"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.141.1",
+    "langchain>=1.0.0",
+    "langchain-ollama>=1.0.0",
+    "langchain-openrouter>=0.2.8",
+    "langgraph>=1.0.0",
+    "openai>=3.13.0",
+    "pydantic>=2.13.5",
+    "uvicorn>=0.52.4",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
