@@ -1,15 +1,18 @@
 import logging
 import os
 import time
+import json
 from uuid import uuid4
 from typing import Any
 from typing import Literal
+from fastapi.responses import StreamingResponse
 
 from fastapi import FastAPI
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain.tools import tool
 from pydantic import BaseModel, Field
+
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -78,32 +81,35 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1)
     stream: bool = False
 
+def stream_chat(messages):
+      inputs = {"messages": [message.model_dump() for message in messages]}
+
+      for chunk in agent.stream(
+          inputs,
+          stream_mode="messages",
+          version="v2",
+      ):
+          if chunk["type"] != "messages":
+              continue
+
+          token, metadata = chunk["data"]
+          text = getattr(token, "text", "")
+
+          if text:
+              yield f"data: {json.dumps({'choices': [{'delta': {'content': text}}]})}\n\n"
+
+      yield "data: [DONE]\n\n"
 
 @app.post("/v1/chat/completions")
 def chat_completions(request: ChatCompletionRequest):
-    # Invoke the LangGraph agent and return its final assistant message.
-    request_id = uuid4().hex[:8]
-    started = time.perf_counter()
-    logger.info(
-        "[%s] REQUEST START model=%s messages=%d prompt=%s stream=%s",
-        request_id,
-        request.model or os.getenv("LLM_MODEL", "qwen3:1.7b"),
-        len(request.messages),
-        preview(request.messages[-1].content),
-        request.stream,
-    )
-    try:
-        result = agent.invoke(
-            {"messages": [message.model_dump() for message in request.messages]},
-        )
-        response = result["messages"][-1].content
-        logger.info(
-            "[%s] REQUEST END duration_ms=%.0f response=%s",
-            request_id,
-            (time.perf_counter() - started) * 1000,
-            preview(response),
-        )
-        return {"message": response}
-    except Exception:
-        logger.exception("[%s] REQUEST FAILED duration_ms=%.0f", request_id, (time.perf_counter() - started) * 1000)
-        raise
+      if request.stream:
+          return StreamingResponse(
+              stream_chat(request.messages),
+              media_type="text/event-stream",
+          )
+
+      result = agent.invoke({
+          "messages": [message.model_dump() for message in request.messages]
+      })
+
+      return {"message": result["messages"][-1].content}
