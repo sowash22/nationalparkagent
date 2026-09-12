@@ -2,11 +2,15 @@ import json
 import logging
 import os
 import time
+import chromadb
 from typing import Any
 from typing import Literal
 from uuid import uuid4
+from io import BytesIO
 
-from fastapi import FastAPI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pypdf import PdfReader
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
@@ -21,6 +25,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("nationalparkagent")
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+text_splitter = RecursiveCharacterTextSplitter(
+      chunk_size=1000,
+      chunk_overlap=150,
+  )
 
 
 # Keep log values readable when prompts or model responses are large.
@@ -74,6 +83,50 @@ agent = create_agent(
 
 # FastAPI application and the request types for the OpenAI-style endpoint.
 app = FastAPI()
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+document_collection = chroma_client.get_or_create_collection("documents")
+
+#It is paragraph-first chunking, not strictly line-based.
+@app.post("/v1/ingest")
+async def ingest_document(file: UploadFile = File(...)):
+    """Extract and split an uploaded PDF or text document."""
+    allowed_types = {"application/pdf", "text/plain"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=415,
+            detail="Only PDF and plain text documents are supported.",
+        )
+
+    raw_file = await file.read()
+    chunks = []
+    metadatas = []
+
+    if file.content_type == "application/pdf":
+        reader = PdfReader(BytesIO(raw_file))
+        for page_number, page in enumerate(reader.pages, start=1):
+            page_text = page.extract_text() or ""
+            for chunk in text_splitter.split_text(page_text):
+                chunks.append(chunk)
+                metadatas.append({"filename": file.filename, "page": page_number})
+    else:
+        document_text = raw_file.decode("utf-8", errors="replace")
+        for chunk in text_splitter.split_text(document_text):
+            chunks.append(chunk)
+            metadatas.append({"filename": file.filename})
+
+    if not chunks:
+        raise HTTPException(
+            status_code=400,
+            detail="The document contains no readable text.",
+        )
+
+    document_collection.upsert(
+        ids=[str(uuid4()) for _ in chunks],
+        documents=chunks,
+        metadatas=metadatas,
+    )
+
+    return {"status": "indexed", "filename": file.filename, "chunks": len(chunks)}
 
 
 class ChatMessage(BaseModel):
@@ -85,6 +138,41 @@ class ChatCompletionRequest(BaseModel):
     model: str | None = None
     messages: list[ChatMessage] = Field(min_length=1)
     stream: bool = False
+
+
+class RetrievalRequest(BaseModel):
+    query: str = Field(min_length=1)
+
+
+@app.post("/v1/retrieve")
+async def retrieve_documents(request: RetrievalRequest):
+    """Return the five most similar document chunks for a query."""
+    document_count = document_collection.count()
+    if not document_count:
+        return {"query": request.query, "results": []}
+
+    result = document_collection.query(
+        query_texts=[request.query],
+        n_results=min(5, document_count),
+    )
+
+    documents = result.get("documents", [[]])[0]
+    metadatas = result.get("metadatas", [[]])[0]
+    distances = result.get("distances", [[]])[0]
+
+    return {
+        "query": request.query,
+        "results": [
+            {
+                "document": document,
+                "metadata": metadata,
+                "distance": distance,
+            }
+            for document, metadata, distance in zip(
+                documents, metadatas, distances
+            )
+        ],
+    }
 
 
 # An async generator produces one response chunk at a time, so clients can
