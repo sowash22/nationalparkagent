@@ -31,6 +31,10 @@ text_splitter = RecursiveCharacterTextSplitter(
       chunk_overlap=150,
   )
 
+app = FastAPI()
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+document_collection = chroma_client.get_or_create_collection("documents")
+
 
 # Keep log values readable when prompts or model responses are large.
 def preview(value: Any, limit: int = 500) -> str:
@@ -61,6 +65,46 @@ async def get_location() -> str:
     return result
 
 
+def search_document_chunks(query: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Search Chroma and return the closest document chunks."""
+    document_count = document_collection.count()
+    if not document_count:
+        return []
+
+    result = document_collection.query(
+        query_texts=[query],
+        n_results=min(limit, document_count),
+    )
+    documents = result.get("documents", [[]])[0]
+    metadatas = result.get("metadatas", [[]])[0]
+    distances = result.get("distances", [[]])[0]
+
+    return [
+        {
+            "document": document,
+            "metadata": metadata or {},
+            "distance": distance,
+        }
+        for document, metadata, distance in zip(documents, metadatas, distances)
+    ]
+
+
+@tool
+async def search_park_documents(query: str) -> str:
+    """Search uploaded national park documents for relevant information."""
+    results = search_document_chunks(query)
+    if not results:
+        return "No matching document content was found."
+
+    return "\n\n".join(
+        f"Source: {item['metadata'].get('filename', 'unknown')}"
+        + (f" page {item['metadata']['page']}" if "page" in item["metadata"] else "")
+        + "\n"
+        f"{item['document']}"
+        for item in results
+    )
+
+
 # Build the model from environment variables so the provider can be changed
 # without changing the agent or API code. This supports Ollama locally today
 # and OpenRouter later.
@@ -77,16 +121,13 @@ model = init_chat_model(
 )
 agent = create_agent(
     model=model,
-    tools=[check_weather, get_location],
-    system_prompt="You are a helpful national park agent.",
+    tools=[check_weather, get_location, search_park_documents],
+    system_prompt=(
+        "You are a helpful national park agent. Use search_park_documents "
+        "for questions about uploaded park documents."
+    ),
 )
 
-# FastAPI application and the request types for the OpenAI-style endpoint.
-app = FastAPI()
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
-document_collection = chroma_client.get_or_create_collection("documents")
-
-#It is paragraph-first chunking, not strictly line-based.
 @app.post("/v1/ingest")
 async def ingest_document(file: UploadFile = File(...)):
     """Extract and split an uploaded PDF or text document."""
@@ -147,31 +188,9 @@ class RetrievalRequest(BaseModel):
 @app.post("/v1/retrieve")
 async def retrieve_documents(request: RetrievalRequest):
     """Return the five most similar document chunks for a query."""
-    document_count = document_collection.count()
-    if not document_count:
-        return {"query": request.query, "results": []}
-
-    result = document_collection.query(
-        query_texts=[request.query],
-        n_results=min(5, document_count),
-    )
-
-    documents = result.get("documents", [[]])[0]
-    metadatas = result.get("metadatas", [[]])[0]
-    distances = result.get("distances", [[]])[0]
-
     return {
         "query": request.query,
-        "results": [
-            {
-                "document": document,
-                "metadata": metadata,
-                "distance": distance,
-            }
-            for document, metadata, distance in zip(
-                documents, metadatas, distances
-            )
-        ],
+        "results": search_document_chunks(request.query),
     }
 
 
