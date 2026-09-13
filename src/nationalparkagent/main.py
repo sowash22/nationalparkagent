@@ -181,13 +181,26 @@ async def check_park_alerts(park_name: str) -> str:
         return f"Park alert lookup failed for {park_name}: {error}"
 
 
-# This tool takes no arguments and returns the user's current location.
-# Multiple async tools can run without blocking the FastAPI event loop.
 @tool
 async def get_location() -> str:
-    """Return the user's mock current location."""
+    """Return the approximate location of the request's public IP address."""
     logger.info("TOOL get_location START")
-    result = "Yosemite National Park, California"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get("https://ipinfo.io/json")
+            response.raise_for_status()
+            location = response.json()
+
+        city = location.get("city")
+        region = location.get("region")
+        country = location.get("country")
+        result = ", ".join(part for part in (city, region, country) if part)
+        if not result:
+            result = "Location unavailable."
+    except (httpx.HTTPError, KeyError, ValueError) as error:
+        logger.exception("TOOL get_location FAILED")
+        result = f"Location lookup failed: {error}"
+
     logger.info("TOOL get_location END result=%s", result)
     return result
 
@@ -259,7 +272,11 @@ agent = create_agent(
         "You are a helpful national park agent. Use search_park_documents "
         "for questions about uploaded park documents, check_weather for "
         "current weather, check_air_quality for air quality questions, and "
-        "check_park_alerts for current NPS alerts."
+        "check_park_alerts for current NPS alerts. Preserve the park or "
+        "location explicitly named by the user and pass that exact location "
+        "to the relevant tools. Only call get_location when the user asks "
+        "for their current location or does not provide a location. Never "
+        "replace an explicitly named park with the result of get_location."
     ),
 )
 
