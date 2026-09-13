@@ -8,7 +8,10 @@ National Park Agent helps users plan visits to national parks using an AI assist
 - Hiking trails and trip difficulty
 - Electric vehicle charging locations
 
-The project currently provides a basic LangChain agent with mock weather and location tools. Real park, weather, AQI, trail, and EV data sources will be connected as the project grows.
+The project currently provides a basic LangChain agent with live weather and
+air-quality tools, mock location data, and document retrieval through a local
+vector database. Real park alerts, trail, and EV data sources will be connected
+as the project grows.
 
 ## Local setup
 
@@ -37,6 +40,17 @@ LLM_MODEL=provider/model-name
 LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_API_KEY=your-openrouter-api-key
 ```
+
+For live National Park Service alerts, request a free API key from the
+[NPS Developer Resources](https://www.nps.gov/subjects/developer/get-started.htm)
+and add it to `.env`:
+
+```env
+NPS_API_KEY=your-nps-api-key
+```
+
+The agent's `check_park_alerts` tool uses this key to find the park and retrieve
+its current alerts. Keep the key private and do not commit `.env`.
 
 ## RAG and vector database
 
@@ -97,7 +111,7 @@ Chroma distance score.
 ## Run the API
 
 ```bash
-uv run uvicorn nationalparkagent.main:app --reload
+uv run uvicorn nationalparkagent.main:app --reload --env-file .env
 ```
 
 The chat endpoint is:

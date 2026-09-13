@@ -3,6 +3,7 @@ import logging
 import os
 import time
 import chromadb
+import httpx
 from typing import Any
 from typing import Literal
 from uuid import uuid4
@@ -47,11 +48,137 @@ def preview(value: Any, limit: int = 500) -> str:
 # `@tool` exposes the function name, description, and arguments to the LLM.
 @tool
 async def check_weather(location: str) -> str:
-    """Return the mock weather forecast for a location."""
+    """Return the current weather for a location using Open-Meteo."""
     logger.info("TOOL check_weather START location=%s", location)
-    result = f"It's always sunny in {location}."
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            geocoding_response = await client.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": location, "count": 1, "language": "en", "format": "json"},
+            )
+            geocoding_response.raise_for_status()
+            locations = geocoding_response.json().get("results", [])
+            if not locations:
+                return f"I couldn't find a location named {location}."
+
+            place = locations[0]
+            weather_response = await client.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": place["latitude"],
+                    "longitude": place["longitude"],
+                    "current": (
+                        "temperature_2m,apparent_temperature,relative_humidity_2m,"
+                        "wind_speed_10m,weather_code"
+                    ),
+                    "temperature_unit": "fahrenheit",
+                    "wind_speed_unit": "mph",
+                    "timezone": "auto",
+                },
+            )
+            weather_response.raise_for_status()
+            current = weather_response.json()["current"]
+
+        result = (
+            f"Current weather for {place['name']}, {place.get('admin1', '')}: "
+            f"{current['temperature_2m']}°F, feels like "
+            f"{current['apparent_temperature']}°F, humidity "
+            f"{current['relative_humidity_2m']}%, wind "
+            f"{current['wind_speed_10m']} mph, weather code "
+            f"{current['weather_code']} (as of {current['time']})."
+        )
+    except (httpx.HTTPError, KeyError) as error:
+        logger.exception("TOOL check_weather FAILED location=%s", location)
+        result = f"Weather lookup failed for {location}: {error}"
+
     logger.info("TOOL check_weather END result=%s", result)
     return result
+
+
+@tool
+async def check_air_quality(location: str) -> str:
+    """Return current air quality for a location using Open-Meteo."""
+    logger.info("TOOL check_air_quality START location=%s", location)
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            geocoding_response = await client.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": location, "count": 1, "language": "en", "format": "json"},
+            )
+            geocoding_response.raise_for_status()
+            locations = geocoding_response.json().get("results", [])
+            if not locations:
+                return f"I couldn't find a location named {location}."
+
+            place = locations[0]
+            air_quality_response = await client.get(
+                "https://air-quality-api.open-meteo.com/v1/air-quality",
+                params={
+                    "latitude": place["latitude"],
+                    "longitude": place["longitude"],
+                    "current": "us_aqi,pm2_5,pm10,ozone,nitrogen_dioxide",
+                    "timezone": "auto",
+                },
+            )
+            air_quality_response.raise_for_status()
+            current = air_quality_response.json()["current"]
+
+        result = (
+            f"Current air quality for {place['name']}, {place.get('admin1', '')}: "
+            f"U.S. AQI {current['us_aqi']}, PM2.5 {current['pm2_5']} µg/m³, "
+            f"PM10 {current['pm10']} µg/m³, ozone {current['ozone']} µg/m³, "
+            f"nitrogen dioxide {current['nitrogen_dioxide']} µg/m³ "
+            f"(as of {current['time']})."
+        )
+    except (httpx.HTTPError, KeyError) as error:
+        logger.exception("TOOL check_air_quality FAILED location=%s", location)
+        result = f"Air quality lookup failed for {location}: {error}"
+
+    logger.info("TOOL check_air_quality END result=%s", result)
+    return result
+
+
+@tool
+async def check_park_alerts(park_name: str) -> str:
+    """Return current National Park Service alerts for a park."""
+    logger.info("TOOL check_park_alerts START park=%s", park_name)
+    api_key = os.getenv("NPS_API_KEY")
+    if not api_key:
+        return "NPS_API_KEY is not configured, so park alerts are unavailable."
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=10,
+            headers={"X-Api-Key": api_key},
+        ) as client:
+            parks_response = await client.get(
+                "https://developer.nps.gov/api/v1/parks",
+                params={"q": park_name, "limit": 1},
+            )
+            parks_response.raise_for_status()
+            parks = parks_response.json().get("data", [])
+            if not parks:
+                return f"I couldn't find an NPS park named {park_name}."
+
+            park = parks[0]
+            alerts_response = await client.get(
+                "https://developer.nps.gov/api/v1/alerts",
+                params={"parkCode": park["parkCode"], "limit": 10},
+            )
+            alerts_response.raise_for_status()
+            alerts = alerts_response.json().get("data", [])
+
+        if not alerts:
+            return f"There are no current alerts for {park['fullName']}."
+
+        return "\n\n".join(
+            f"{alert.get('category', 'Alert')}: {alert.get('title', 'Untitled')}\n"
+            f"{alert.get('description', 'No description available.')}"
+            for alert in alerts
+        )
+    except (httpx.HTTPError, KeyError) as error:
+        logger.exception("TOOL check_park_alerts FAILED park=%s", park_name)
+        return f"Park alert lookup failed for {park_name}: {error}"
 
 
 # This tool takes no arguments and returns the user's current location.
@@ -121,10 +248,18 @@ model = init_chat_model(
 )
 agent = create_agent(
     model=model,
-    tools=[check_weather, get_location, search_park_documents],
+    tools=[
+        check_weather,
+        check_air_quality,
+        check_park_alerts,
+        get_location,
+        search_park_documents,
+    ],
     system_prompt=(
         "You are a helpful national park agent. Use search_park_documents "
-        "for questions about uploaded park documents."
+        "for questions about uploaded park documents, check_weather for "
+        "current weather, check_air_quality for air quality questions, and "
+        "check_park_alerts for current NPS alerts."
     ),
 )
 
