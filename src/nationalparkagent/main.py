@@ -6,6 +6,7 @@ import chromadb
 import httpx
 from typing import Any
 from typing import Literal
+from pathlib import Path
 from uuid import uuid4
 from io import BytesIO
 
@@ -13,8 +14,10 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from deepagents import create_deep_agent
+from deepagents.backends.filesystem import FilesystemBackend
 from langchain.tools import tool
 from pydantic import BaseModel, Field
 
@@ -46,55 +49,6 @@ def preview(value: Any, limit: int = 500) -> str:
 # A tool is a normal Python function that the model is allowed to call.
 # `async def` lets it perform future network/database work without blocking.
 # `@tool` exposes the function name, description, and arguments to the LLM.
-@tool
-async def check_weather(location: str) -> str:
-    """Return the current weather for a location using Open-Meteo."""
-    logger.info("TOOL check_weather START location=%s", location)
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            geocoding_response = await client.get(
-                "https://geocoding-api.open-meteo.com/v1/search",
-                params={"name": location, "count": 1, "language": "en", "format": "json"},
-            )
-            geocoding_response.raise_for_status()
-            locations = geocoding_response.json().get("results", [])
-            if not locations:
-                return f"I couldn't find a location named {location}."
-
-            place = locations[0]
-            weather_response = await client.get(
-                "https://api.open-meteo.com/v1/forecast",
-                params={
-                    "latitude": place["latitude"],
-                    "longitude": place["longitude"],
-                    "current": (
-                        "temperature_2m,apparent_temperature,relative_humidity_2m,"
-                        "wind_speed_10m,weather_code"
-                    ),
-                    "temperature_unit": "fahrenheit",
-                    "wind_speed_unit": "mph",
-                    "timezone": "auto",
-                },
-            )
-            weather_response.raise_for_status()
-            current = weather_response.json()["current"]
-
-        result = (
-            f"Current weather for {place['name']}, {place.get('admin1', '')}: "
-            f"{current['temperature_2m']}°F, feels like "
-            f"{current['apparent_temperature']}°F, humidity "
-            f"{current['relative_humidity_2m']}%, wind "
-            f"{current['wind_speed_10m']} mph, weather code "
-            f"{current['weather_code']} (as of {current['time']})."
-        )
-    except (httpx.HTTPError, KeyError) as error:
-        logger.exception("TOOL check_weather FAILED location=%s", location)
-        result = f"Weather lookup failed for {location}: {error}"
-
-    logger.info("TOOL check_weather END result=%s", result)
-    return result
-
-
 @tool
 async def check_air_quality(location: str) -> str:
     """Return current air quality for a location using Open-Meteo."""
@@ -259,26 +213,33 @@ model = init_chat_model(
     model_provider=os.getenv("LLM_PROVIDER", "ollama"),
     **model_options,
 )
-agent = create_agent(
-    model=model,
-    tools=[
-        check_weather,
-        check_air_quality,
-        check_park_alerts,
-        get_location,
-        search_park_documents,
-    ],
-    system_prompt=(
-        "You are a helpful national park agent. Use search_park_documents "
-        "for questions about uploaded park documents, check_weather for "
-        "current weather, check_air_quality for air quality questions, and "
-        "check_park_alerts for current NPS alerts. Preserve the park or "
-        "location explicitly named by the user and pass that exact location "
-        "to the relevant tools. Only call get_location when the user asks "
-        "for their current location or does not provide a location. Never "
-        "replace an explicitly named park with the result of get_location."
-    ),
-)
+eris_client = MultiServerMCPClient({
+    "eris": {
+        "transport": "streamable_http",
+        "url": "https://weather-api.madadipouya.com/mcp",
+    }
+})
+agent = None
+project_root = Path(__file__).resolve().parents[2]
+
+
+@app.on_event("startup")
+async def configure_agent():
+    global agent
+    eris_tools = await eris_client.get_tools()
+    agent = create_deep_agent(
+        model=model,
+        backend=FilesystemBackend(root_dir=str(project_root), virtual_mode=True),
+        skills=["skills/"],
+        tools=[
+            *eris_tools,
+            check_air_quality,
+            check_park_alerts,
+            get_location,
+            search_park_documents,
+        ],
+        system_prompt="You are a helpful National Park travel assistant.",
+    )
 
 @app.post("/v1/ingest")
 async def ingest_document(file: UploadFile = File(...)):
