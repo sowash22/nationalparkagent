@@ -36,12 +36,10 @@ text_splitter = RecursiveCharacterTextSplitter(
   )
 
 app = FastAPI()
-chroma_path = os.getenv(
-    "CHROMA_PATH",
-    "/tmp/nationalparkagent-chroma" if os.getenv("VERCEL") else "./chroma_db",
-)
-chroma_client = chromadb.PersistentClient(path=chroma_path)
-document_collection = chroma_client.get_or_create_collection("documents")
+chroma_disabled = os.getenv("DISABLE_CHROMA", "true" if os.getenv("VERCEL") else "false").lower() == "true"
+document_collection = None if chroma_disabled else chromadb.PersistentClient(
+    path=os.getenv("CHROMA_PATH", "./chroma_db")
+).get_or_create_collection("documents")
 
 
 # Keep log values readable when prompts or model responses are large.
@@ -165,6 +163,9 @@ async def get_location() -> str:
 
 def search_document_chunks(query: str, limit: int = 5) -> list[dict[str, Any]]:
     """Search Chroma and return the closest document chunks."""
+    if document_collection is None:
+        return []
+
     document_count = document_collection.count()
     if not document_count:
         return []
@@ -253,6 +254,12 @@ async def configure_agent():
 @app.post("/v1/ingest")
 async def ingest_document(file: UploadFile = File(...)):
     """Extract and split an uploaded PDF or text document."""
+    if document_collection is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Document ingestion is disabled in this deployment.",
+        )
+
     allowed_types = {"application/pdf", "text/plain"}
     if file.content_type not in allowed_types:
         raise HTTPException(
