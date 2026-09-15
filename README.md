@@ -8,10 +8,9 @@ National Park Agent helps users plan visits to national parks using an AI assist
 - Hiking trails and trip difficulty
 - Electric vehicle charging locations
 
-The project currently provides a basic LangChain agent with live weather and
-air-quality tools, mock location data, and document retrieval through a local
-vector database. Real park alerts, trail, and EV data sources will be connected
-as the project grows.
+The project provides a LangGraph-based agent with live weather, air-quality,
+park-alert, location, and document-retrieval tools. Weather is connected to the
+hosted Eris MCP server, and documents are stored in a local vector database.
 
 ## Local setup
 
@@ -51,6 +50,23 @@ NPS_API_KEY=your-nps-api-key
 
 The agent's `check_park_alerts` tool uses this key to find the park and retrieve
 its current alerts. Keep the key private and do not commit `.env`.
+
+## LangSmith observability
+
+LangSmith automatically traces LangChain and LangGraph runs when tracing is
+enabled. Add these variables to `.env`:
+
+```env
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your-langsmith-api-key
+LANGSMITH_PROJECT=national-park-agent
+```
+
+Restart the API after changing `.env`, then open the project in
+[LangSmith](https://smith.langchain.com/). You can inspect complete agent
+traces, tool calls, model calls, latency, errors, and token usage when the model
+provider reports token data. The default endpoint is the LangSmith cloud API;
+set `LANGSMITH_ENDPOINT` only for another LangSmith deployment.
 
 ## RAG and vector database
 

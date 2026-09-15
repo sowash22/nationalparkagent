@@ -226,7 +226,12 @@ project_root = Path(__file__).resolve().parents[2]
 @app.on_event("startup")
 async def configure_agent():
     global agent
-    eris_tools = await eris_client.get_tools()
+    try:
+        eris_tools = await eris_client.get_tools()
+    except Exception:
+        logger.exception("Eris MCP unavailable; starting without weather tools")
+        eris_tools = []
+
     agent = create_deep_agent(
         model=model,
         backend=FilesystemBackend(root_dir=str(project_root), virtual_mode=True),
