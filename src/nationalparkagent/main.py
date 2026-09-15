@@ -36,7 +36,11 @@ text_splitter = RecursiveCharacterTextSplitter(
   )
 
 app = FastAPI()
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+chroma_path = os.getenv(
+    "CHROMA_PATH",
+    "/tmp/nationalparkagent-chroma" if os.getenv("VERCEL") else "./chroma_db",
+)
+chroma_client = chromadb.PersistentClient(path=chroma_path)
 document_collection = chroma_client.get_or_create_collection("documents")
 
 
